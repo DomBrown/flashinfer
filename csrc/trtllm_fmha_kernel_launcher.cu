@@ -232,7 +232,8 @@ void trtllm_paged_attention_decode(
     double o_sf_scale, int64_t o_sf_vec_size, int64_t o_sf_start_index, int64_t batch_size,
     int64_t window_left, int64_t sparse_mla_top_k, int64_t sm_count, bool enable_pdl,
     int64_t workspace_size, Optional<TensorView> attention_sinks,
-    Optional<TensorView> cum_seq_lens_q, Optional<float> skip_softmax_threshold_scale_factor) {
+    Optional<TensorView> cum_seq_lens_q, Optional<float> skip_softmax_threshold_scale_factor,
+    Optional<TensorView> skip_softmax_stats_buffer) {
   auto q_data_type = dl_dtype_to_tllm_data_type(query.dtype());
   auto kv_data_type = dl_dtype_to_tllm_data_type(key_cache.dtype());
   TVM_FFI_ICHECK_EQ(key_cache.ndim(), value_cache.ndim());
@@ -308,7 +309,17 @@ void trtllm_paged_attention_decode(
   float const skip_softmax_threshold_scale_factor_value =
       skip_softmax_threshold_scale_factor.value_or(0.0f);
   bool const skips_softmax = skip_softmax_threshold_scale_factor_value != 0.0f;
-  int32_t* skip_softmax_stats_buffer_ptr = nullptr;  // TODO
+
+  // Skip softmax stats should be dtype int32 tensor.
+  bool const collect_skip_softmax_stats = skip_softmax_stats_buffer.has_value();
+  int32_t* skip_softmax_stats_buffer_ptr = nullptr;
+  if (collect_skip_softmax_stats) {
+    TVM_FFI_ICHECK_EQ(skip_softmax_stats_buffer.value().dtype(), dl_int32)
+        << "skip_softmax_stats_buffer must be a int32 tensor";
+
+    skip_softmax_stats_buffer_ptr =
+        static_cast<int32_t*>(skip_softmax_stats_buffer.value().data_ptr());
+  }
 
   trtllm_paged_attention_launcher(
       out.data_ptr(), output_sf_ptr, query.data_ptr(), key_cache.data_ptr(), value_cache.data_ptr(),

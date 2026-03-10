@@ -1941,6 +1941,7 @@ class TrtllmGenDecodeModule:
         out: Optional[torch.Tensor] = None,
         sinks: Optional[torch.Tensor] = None,
         skip_softmax_threshold_scale_factor: Optional[float] = None,
+        skip_softmax_stats_buffer: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if out is None:
             out = torch.empty_like(query)
@@ -1983,6 +1984,7 @@ class TrtllmGenDecodeModule:
             sinks,
             None,  # cum_seq_lens_q
             skip_softmax_threshold_scale_factor,
+            skip_softmax_stats_buffer,
         )
         return out
 
@@ -2045,6 +2047,7 @@ def get_trtllm_gen_decode_module(*args):
         max_kv_len: Optional[int] = None,
         sinks: Optional[torch.Tensor] = None,
         skip_softmax_threshold_scale_factor: Optional[float] = None,
+        skip_softmax_stats_buffer: Optional[torch.Tensor] = None,
     ) -> None:
         assert maybe_lse is None
         assert paged_kv_cache is not None
@@ -2072,6 +2075,7 @@ def get_trtllm_gen_decode_module(*args):
             out=o,
             sinks=sinks,
             skip_softmax_threshold_scale_factor=skip_softmax_threshold_scale_factor,
+            skip_softmax_stats_buffer=skip_softmax_stats_buffer,
         )
 
     @register_fake_op(f"flashinfer::{uri}_paged_run")
@@ -2150,6 +2154,7 @@ def trtllm_batch_decode_with_kv_cache(
     max_q_len: Optional[int] = None,
     cum_seq_lens_q: Optional[torch.Tensor] = None,
     skip_softmax_threshold_scale_factor: Optional[float] = None,
+    skip_softmax_stats_buffer: Optional[torch.Tensor] = None,
 ) -> Union[torch.Tensor, FP4Tensor]:
     """
     Parameters
@@ -2421,6 +2426,7 @@ def trtllm_batch_decode_with_kv_cache(
             sinks,
             cum_seq_lens_q,
             skip_softmax_threshold_scale_factor,
+            skip_softmax_stats_buffer,
         )
 
         return (
