@@ -1,5 +1,5 @@
 import math
-
+import time
 import pytest
 import torch
 from flashinfer.mla import (
@@ -436,6 +436,7 @@ def _test_trtllm_batch_prefill(
     head_dim: int,
     non_contiguous_query: bool = False,
     skips_softmax: bool = False,
+    use_skip_softmax_stats: bool = False,
 ):
     compute_capability = get_compute_capability(torch.device(device="cuda"))
     if compute_capability[0] != 10:
@@ -445,6 +446,9 @@ def _test_trtllm_batch_prefill(
         pytest.skip(
             "skips_softmax does not currently support Q and Kv types being different"
         )
+
+    if use_skip_softmax_stats and not skips_softmax:
+        pytest.skip("use_skip_softmax_stats requires skips_softmax")
 
     # Set up test parameters
     torch.manual_seed(0)
@@ -559,6 +563,13 @@ def _test_trtllm_batch_prefill(
     # Using a tiny threshold should give the same result as normal attention.
     skip_softmax_threshold_scale_factor = 1e-30 if skips_softmax else None
 
+    # if collecting skip stats we need a buffer of 4 integers.
+    # The kernel does not zero the buffer, just atomically adds to it.
+    if use_skip_softmax_stats:
+        skip_softmax_stats_buffer = torch.zeros(4, device=GPU_DEVICE, dtype=torch.int32)
+    else:
+        skip_softmax_stats_buffer = None
+
     output = flashinfer.prefill.trtllm_batch_context_with_kv_cache(
         q_input,
         kv_cache,
@@ -581,66 +592,79 @@ def _test_trtllm_batch_prefill(
         enable_pdl=enable_pdl,
         sinks=(sink if enable_sink else None),
         skip_softmax_threshold_scale_factor=skip_softmax_threshold_scale_factor,
-    )
-    # check if the first 8192 * 256 * 4 bytes of workspace_buffer is zero
-    # note(Yingyi): the first 8192 * 256 * 4 bytes of workspace_buffer is the counter workspace, size might change in the future
-    assert (workspace_buffer[: 8192 * 256 * 4].cpu().numpy() == 0).all()
-
-    if o_dtype == "nvfp4":
-        output, output_ref = unpack_compare_nvfp4(
-            output, output_ref, o_sf_scale, o_sf_vec_size
-        )
-        assert o_scale == 1.0
-        rtol, atol = 4e-1, 1e0
-    elif q_dtype == "fp8" and o_dtype == "fp8":
-        rtol, atol = 5e-2, 7e-2
-    elif q_dtype == "fp8" and o_dtype in ["bf16", "fp16"]:
-        rtol, atol = 4e-2, 6e-2
-    else:
-        rtol, atol = 1e-2, 1e-2
-
-    # Arbitary small mismatch rate
-    allowed_mismatch_rate = 1e-7
-    # Calculate max allowed mismatched elements based on tensor size
-    total_elements = (output.float() * o_scale).numel()
-    max_mismatched_elements = int(allowed_mismatch_rate * total_elements)
-
-    # convert to float32 for fp8 is not supported by assert_close
-    assert_close_with_mismatch_tolerance(
-        output.float() * o_scale,
-        output_ref.float(),
-        rtol=rtol,
-        atol=atol,
-        max_mismatched_elements=max_mismatched_elements,
+        skip_softmax_stats_buffer=skip_softmax_stats_buffer,
     )
 
-    if o_dtype != "nvfp4":  # wrapper api does not support fp4 output yet.
-        # test wrapper with trtllm-gen backend
-        wrapper_trtllm_gen = flashinfer.prefill.BatchPrefillWithPagedKVCacheWrapper(
-            workspace_buffer, kv_layout, backend="trtllm-gen"
-        )
-        plan_params["q_data_type"] = q.dtype
-        plan_params["kv_data_type"] = kv_cache.dtype
-        wrapper_trtllm_gen.plan(**plan_params)
-        output_wrapper = wrapper_trtllm_gen.run(
-            q_input,
-            kv_cache,
-            q_scale=q_scale,
-            k_scale=k_scale,
-            v_scale=v_scale / o_scale,
-            enable_pdl=enable_pdl,
-            sinks=(sink if enable_sink else None),
-        )
-        # v_scale, o_scale in wrapper is emulated by multiplying output by v_scale instead of fused into kernel.
-        if v_scale == o_scale == 1.0:
-            assert (output_wrapper == output).all()
-        else:
-            torch.testing.assert_close(
-                output.float(), output_wrapper.float(), rtol=1e-1, atol=1e-1
-            )
+    # sleep for 3 seconds
+    time.sleep(3)
+
+    torch.cuda.synchronize()
+
+    # copy to CPU and print stats
+    if use_skip_softmax_stats:
+        skip_softmax_stats_buffer_cpu = skip_softmax_stats_buffer.cpu()
+        print(skip_softmax_stats_buffer_cpu)
+
+    if not use_skip_softmax_stats:
         # check if the first 8192 * 256 * 4 bytes of workspace_buffer is zero
         # note(Yingyi): the first 8192 * 256 * 4 bytes of workspace_buffer is the counter workspace, size might change in the future
         assert (workspace_buffer[: 8192 * 256 * 4].cpu().numpy() == 0).all()
+
+        if o_dtype == "nvfp4":
+            output, output_ref = unpack_compare_nvfp4(
+                output, output_ref, o_sf_scale, o_sf_vec_size
+            )
+            assert o_scale == 1.0
+            rtol, atol = 4e-1, 1e0
+        elif q_dtype == "fp8" and o_dtype == "fp8":
+            rtol, atol = 5e-2, 7e-2
+        elif q_dtype == "fp8" and o_dtype in ["bf16", "fp16"]:
+            rtol, atol = 4e-2, 6e-2
+        else:
+            rtol, atol = 1e-2, 1e-2
+
+        # Arbitary small mismatch rate
+        allowed_mismatch_rate = 1e-7
+        # Calculate max allowed mismatched elements based on tensor size
+        total_elements = (output.float() * o_scale).numel()
+        max_mismatched_elements = int(allowed_mismatch_rate * total_elements)
+
+        # convert to float32 for fp8 is not supported by assert_close
+        assert_close_with_mismatch_tolerance(
+            output.float() * o_scale,
+            output_ref.float(),
+            rtol=rtol,
+            atol=atol,
+            max_mismatched_elements=max_mismatched_elements,
+        )
+
+        if o_dtype != "nvfp4":  # wrapper api does not support fp4 output yet.
+            # test wrapper with trtllm-gen backend
+            wrapper_trtllm_gen = flashinfer.prefill.BatchPrefillWithPagedKVCacheWrapper(
+                workspace_buffer, kv_layout, backend="trtllm-gen"
+            )
+            plan_params["q_data_type"] = q.dtype
+            plan_params["kv_data_type"] = kv_cache.dtype
+            wrapper_trtllm_gen.plan(**plan_params)
+            output_wrapper = wrapper_trtllm_gen.run(
+                q_input,
+                kv_cache,
+                q_scale=q_scale,
+                k_scale=k_scale,
+                v_scale=v_scale / o_scale,
+                enable_pdl=enable_pdl,
+                sinks=(sink if enable_sink else None),
+            )
+            # v_scale, o_scale in wrapper is emulated by multiplying output by v_scale instead of fused into kernel.
+            if v_scale == o_scale == 1.0:
+                assert (output_wrapper == output).all()
+            else:
+                torch.testing.assert_close(
+                    output.float(), output_wrapper.float(), rtol=1e-1, atol=1e-1
+                )
+            # check if the first 8192 * 256 * 4 bytes of workspace_buffer is zero
+            # note(Yingyi): the first 8192 * 256 * 4 bytes of workspace_buffer is the counter workspace, size might change in the future
+            assert (workspace_buffer[: 8192 * 256 * 4].cpu().numpy() == 0).all()
 
 
 @pytest.mark.parametrize("kv_layout", ["HND", "NHD"])
@@ -1669,4 +1693,74 @@ def test_trtllm_batch_decode_spec(
         head_dim,
         max_q_len=max_q_len,
         skips_softmax=skips_softmax,
+    )
+
+
+@pytest.mark.parametrize("kv_layout", ["HND", "NHD"])
+@pytest.mark.parametrize(
+    "batch_size,page_size,num_kv_heads,head_grp_size",
+    [
+        (4, 16, 2, 1),
+        (4, 32, 4, 5),
+        (4, 64, 4, 8),
+        (128, 16, 2, 5),
+        (128, 32, 4, 1),
+        (128, 64, 2, 8),
+        (256, 16, 4, 8),
+        (256, 32, 2, 8),
+        (256, 64, 4, 1),
+        (256, 64, 4, 5),
+    ],
+)
+@pytest.mark.parametrize("window_left", [-1])  # todo(Siyuan): add 127 window_left
+@pytest.mark.parametrize(
+    "q_dtype,kv_dtype,o_dtype",
+    [
+        ("bf16", "bf16", "bf16"),
+    ],
+)
+@pytest.mark.parametrize("enable_pdl", [None])
+@pytest.mark.parametrize("enable_sink", [False])
+@pytest.mark.parametrize("max_q_len", [511])
+@pytest.mark.parametrize("max_kv_len", [2047])
+@pytest.mark.parametrize("head_dim", [128])
+@pytest.mark.parametrize("non_contiguous_query", [False])
+@pytest.mark.parametrize("skips_softmax", [True])
+def test_trtllm_batch_prefill_skip_stats(
+    kv_layout: str,
+    batch_size: int,
+    page_size: int,
+    num_kv_heads: int,
+    head_grp_size: int,
+    window_left: int,
+    q_dtype: str,
+    o_dtype: str,
+    kv_dtype: str,
+    enable_pdl: bool,
+    enable_sink: bool,
+    max_q_len: int,
+    max_kv_len: int,
+    head_dim: int,
+    non_contiguous_query: bool,
+    skips_softmax: bool,
+):
+    _test_trtllm_batch_prefill(
+        kv_layout,
+        batch_size,
+        page_size,
+        num_kv_heads,
+        head_grp_size,
+        window_left,
+        q_dtype,
+        o_dtype,
+        kv_dtype,
+        enable_pdl,
+        enable_sink,
+        max_q_len,
+        max_kv_len,
+        kv_dtype == "fp8",
+        head_dim,
+        non_contiguous_query=non_contiguous_query,
+        skips_softmax=skips_softmax,
+        use_skip_softmax_stats=True,
     )

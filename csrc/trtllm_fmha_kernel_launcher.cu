@@ -85,7 +85,8 @@ void trtllm_paged_attention_launcher(
     const float* bmm1_scale_log2_ptr, const float* bmm2_scale_ptr, double o_sf_scale,
     int64_t o_sf_vec_size, int64_t o_sf_start_index, int64_t window_left, int64_t sum_seq_q,
     int64_t sparse_mla_top_k, float skip_softmax_threshold_scale_factor, bool skips_softmax,
-    int64_t sm_count, bool enable_pdl, int64_t workspace_size, cudaStream_t stream) {
+    int32_t* skip_softmax_stats_buffer_ptr, int64_t sm_count, bool enable_pdl,
+    int64_t workspace_size, cudaStream_t stream) {
   if (num_qo_heads % num_kv_heads != 0) {
     std::ostringstream err_msg;
     err_msg << "num_qo_heads must be a multiple of num_kv_heads, got num_kv_heads: " << num_kv_heads
@@ -190,6 +191,9 @@ void trtllm_paged_attention_launcher(
   // Params for skipping softmax.
   runner_params.mSkipsSoftmaxWhenPossible = skips_softmax;
   runner_params.mSkipSoftmaxThresholdScaleFactor = skip_softmax_threshold_scale_factor;
+  runner_params.mSkipSoftmaxStatsBufferPtr = skip_softmax_stats_buffer_ptr;
+
+  std::cout << "******* GOT PTR: " << runner_params.mSkipSoftmaxStatsBufferPtr << std::endl;
 
   auto [foundKernels, kinfo] = fmha_runner->isSupportedWithInfo(runner_params);
   if (!foundKernels) {
@@ -306,6 +310,7 @@ void trtllm_paged_attention_decode(
   float const skip_softmax_threshold_scale_factor_value =
       skip_softmax_threshold_scale_factor.value_or(0.0f);
   bool const skips_softmax = skip_softmax_threshold_scale_factor_value != 0.0f;
+  int32_t* skip_softmax_stats_buffer_ptr = nullptr;  // TODO
 
   trtllm_paged_attention_launcher(
       out.data_ptr(), output_sf_ptr, query.data_ptr(), key_cache.data_ptr(), value_cache.data_ptr(),
@@ -317,8 +322,8 @@ void trtllm_paged_attention_decode(
       q_stride_heads, kv_stride_keys_values, kv_stride_heads, kv_stride_batch,
       max_num_blocks_per_seq, bmm1_scale_value, bmm2_scale_value, bmm1_scale_log2_ptr,
       bmm2_scale_ptr, o_sf_scale, o_sf_vec_size, o_sf_start_index, window_left, sum_seq_q,
-      sparse_mla_top_k, skip_softmax_threshold_scale_factor_value, skips_softmax, sm_count,
-      enable_pdl, workspace_size, stream);
+      sparse_mla_top_k, skip_softmax_threshold_scale_factor_value, skips_softmax,
+      skip_softmax_stats_buffer_ptr, sm_count, enable_pdl, workspace_size, stream);
 }
 
 void trtllm_paged_attention_context(
@@ -329,7 +334,8 @@ void trtllm_paged_attention_context(
     double o_sf_scale, int64_t o_sf_vec_size, int64_t o_sf_start_index, int64_t batch_size,
     int64_t window_left, TensorView cum_seq_lens_q, TensorView cum_seq_lens_kv, int64_t sm_count,
     bool enable_pdl, int64_t workspace_size, Optional<TensorView> attention_sinks,
-    Optional<float> skip_softmax_threshold_scale_factor) {
+    Optional<float> skip_softmax_threshold_scale_factor,
+    Optional<TensorView> skip_softmax_stats_buffer) {
   auto q_data_type = dl_dtype_to_tllm_data_type(query.dtype());
   auto kv_data_type = dl_dtype_to_tllm_data_type(key_cache.dtype());
   auto o_data_type = dl_dtype_to_tllm_data_type(out.dtype());
@@ -393,9 +399,25 @@ void trtllm_paged_attention_context(
                               : nullptr;
 
   // If threshold is zero we can fall back to standard attention to reduce overheads.
-  float const skip_softmax_threshold_scale_factor_value =
+  float skip_softmax_threshold_scale_factor_value =
       skip_softmax_threshold_scale_factor.value_or(0.0f);
   bool const skips_softmax = skip_softmax_threshold_scale_factor_value != 0.0f;
+
+  skip_softmax_threshold_scale_factor_value = FLT_MAX;
+
+  // Skip softmax stats should be dtype int32 tensor.
+  bool const collect_skip_softmax_stats = skip_softmax_stats_buffer.has_value();
+  int32_t* skip_softmax_stats_buffer_ptr = nullptr;
+  if (collect_skip_softmax_stats) {
+    TVM_FFI_ICHECK_EQ(skip_softmax_stats_buffer.value().dtype(), dl_int32)
+        << "skip_softmax_stats_buffer must be a int32 tensor";
+
+    skip_softmax_stats_buffer_ptr =
+        static_cast<int32_t*>(skip_softmax_stats_buffer.value().data_ptr());
+    // print shape
+    std::cout << "******* SKIP SOFTMAX STATS BUFFER SHAPE: "
+              << skip_softmax_stats_buffer.value().shape() << std::endl;
+  }
 
   trtllm_paged_attention_launcher(
       out.data_ptr(), output_sf_ptr, query.data_ptr(), key_cache.data_ptr(), value_cache.data_ptr(),
@@ -409,7 +431,7 @@ void trtllm_paged_attention_context(
       kv_stride_heads, kv_stride_batch, max_num_blocks_per_seq, bmm1_scale_value, bmm2_scale_value,
       bmm1_scale_log2_ptr, bmm2_scale_ptr, o_sf_scale, o_sf_vec_size, o_sf_start_index, window_left,
       sum_seq_q, /*sparse_mla_top_k=*/0, skip_softmax_threshold_scale_factor_value, skips_softmax,
-      sm_count, enable_pdl, workspace_size, stream);
+      skip_softmax_stats_buffer_ptr, sm_count, enable_pdl, workspace_size, stream);
 }
 
 void trtllm_ragged_attention_launcher(

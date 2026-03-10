@@ -296,6 +296,8 @@ struct TllmGenFmhaRunnerParams {
   bool mSkipsSoftmaxWhenPossible;
   // Skip softmax threshold scale factor.
   float mSkipSoftmaxThresholdScaleFactor;
+  // Skip softmax stats buffer.
+  int32_t* mSkipSoftmaxStatsBufferPtr;
   // Whether to use sparse MLA.
   bool mSparseMla;
   // The top k value for sparse MLA.

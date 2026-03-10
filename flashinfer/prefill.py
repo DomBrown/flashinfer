@@ -3615,6 +3615,7 @@ def trtllm_batch_context_with_kv_cache(
     enable_pdl: Optional[bool] = None,
     sinks: Optional[List[torch.Tensor]] = None,
     skip_softmax_threshold_scale_factor: Optional[float] = None,
+    skip_softmax_stats_buffer: Optional[torch.Tensor] = None,
 ) -> Union[torch.Tensor, FP4Tensor]:
     """
     Parameters
@@ -3673,6 +3674,12 @@ def trtllm_batch_context_with_kv_cache(
         If no value is provided, then standard attention is used.
         Setting the threshold to a higher value generally increases kernel performance at the cost of accuracy degradation.
         The actual threshold value equals the provided threshold_scale_factor divided by the context length.
+    skip_softmax_stats_buffer: Optional[torch.Tensor] = None
+        buffer to collect skip softmax stats.
+        If not provided, the kernel will not collect skip softmax stats.
+        skip_softmax_stats_buffer should be a tensor of shape [4] and dtype torch.int32.
+        The kernel does not zero the buffer, just atomically adds to it.
+        [0]: warps that skipped softmax, [1]: total softmax warps, [2]: BMM2s that skipped, [3]: total BMM2s.
     Returns
     -------
     out: Union[torch.Tensor, FP4Tensor]
@@ -3807,6 +3814,7 @@ def trtllm_batch_context_with_kv_cache(
         workspace_size,
         sinks,
         skip_softmax_threshold_scale_factor,
+        skip_softmax_stats_buffer,
     )
     return (
         out
