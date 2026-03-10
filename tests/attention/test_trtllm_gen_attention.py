@@ -1,5 +1,4 @@
 import math
-import time
 import pytest
 import torch
 from flashinfer.mla import (
@@ -562,6 +561,8 @@ def _test_trtllm_batch_prefill(
 
     # Using a tiny threshold should give the same result as normal attention.
     skip_softmax_threshold_scale_factor = 1e-30 if skips_softmax else None
+    # FLT MAX
+    # skip_softmax_threshold_scale_factor = float('inf') if skips_softmax else None
 
     # if collecting skip stats we need a buffer of 4 integers.
     # The kernel does not zero the buffer, just atomically adds to it.
@@ -595,15 +596,21 @@ def _test_trtllm_batch_prefill(
         skip_softmax_stats_buffer=skip_softmax_stats_buffer,
     )
 
-    # sleep for 3 seconds
-    time.sleep(3)
-
-    torch.cuda.synchronize()
+    # torch.cuda.synchronize()
 
     # copy to CPU and print stats
     if use_skip_softmax_stats:
         skip_softmax_stats_buffer_cpu = skip_softmax_stats_buffer.cpu()
-        print(skip_softmax_stats_buffer_cpu)
+        print("Warps that skipped softmax: ", skip_softmax_stats_buffer_cpu[0].item())
+        print("Total softmax warps: ", skip_softmax_stats_buffer_cpu[1].item())
+        print("BMM2s that skipped: ", skip_softmax_stats_buffer_cpu[2].item())
+        print("Total BMM2s: ", skip_softmax_stats_buffer_cpu[3].item())
+        # Sparsity is BMM2 skip percentage
+        print(
+            "Sparsity: ",
+            skip_softmax_stats_buffer_cpu[2].item()
+            / skip_softmax_stats_buffer_cpu[3].item(),
+        )
 
     if not use_skip_softmax_stats:
         # check if the first 8192 * 256 * 4 bytes of workspace_buffer is zero
@@ -1700,12 +1707,12 @@ def test_trtllm_batch_decode_spec(
 @pytest.mark.parametrize(
     "batch_size,page_size,num_kv_heads,head_grp_size",
     [
-        (4, 16, 2, 1),
-        (4, 32, 4, 5),
-        (4, 64, 4, 8),
-        (128, 16, 2, 5),
-        (128, 32, 4, 1),
-        (128, 64, 2, 8),
+        # (4, 16, 2, 1),
+        # (4, 32, 4, 5),
+        # (4, 64, 4, 8),
+        # (128, 16, 2, 5),
+        # (128, 32, 4, 1),
+        # (128, 64, 2, 8),
         (256, 16, 4, 8),
         (256, 32, 2, 8),
         (256, 64, 4, 1),

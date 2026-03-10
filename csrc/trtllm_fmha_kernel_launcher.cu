@@ -193,8 +193,6 @@ void trtllm_paged_attention_launcher(
   runner_params.mSkipSoftmaxThresholdScaleFactor = skip_softmax_threshold_scale_factor;
   runner_params.mSkipSoftmaxStatsBufferPtr = skip_softmax_stats_buffer_ptr;
 
-  std::cout << "******* GOT PTR: " << runner_params.mSkipSoftmaxStatsBufferPtr << std::endl;
-
   auto [foundKernels, kinfo] = fmha_runner->isSupportedWithInfo(runner_params);
   if (!foundKernels) {
     std::ostringstream err_msg;
@@ -403,8 +401,6 @@ void trtllm_paged_attention_context(
       skip_softmax_threshold_scale_factor.value_or(0.0f);
   bool const skips_softmax = skip_softmax_threshold_scale_factor_value != 0.0f;
 
-  skip_softmax_threshold_scale_factor_value = FLT_MAX;
-
   // Skip softmax stats should be dtype int32 tensor.
   bool const collect_skip_softmax_stats = skip_softmax_stats_buffer.has_value();
   int32_t* skip_softmax_stats_buffer_ptr = nullptr;
@@ -414,9 +410,6 @@ void trtllm_paged_attention_context(
 
     skip_softmax_stats_buffer_ptr =
         static_cast<int32_t*>(skip_softmax_stats_buffer.value().data_ptr());
-    // print shape
-    std::cout << "******* SKIP SOFTMAX STATS BUFFER SHAPE: "
-              << skip_softmax_stats_buffer.value().shape() << std::endl;
   }
 
   trtllm_paged_attention_launcher(
